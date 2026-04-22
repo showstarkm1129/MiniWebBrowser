@@ -6,6 +6,7 @@ PyQt6でミニWebブラウザのUIを構築する。
 import sys
 
 from fetcher import fetch_page
+from parser import parse_html
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -62,7 +63,8 @@ class BrowserWindow(QMainWindow):
 
         success, content = fetch_page(url)
         if success:
-            self.text_area.setText(content)
+            text = parse_html(content)
+            self.text_area.setText(text)
         else:
             self.text_area.setText(content)
 
