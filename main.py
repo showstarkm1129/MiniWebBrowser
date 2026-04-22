@@ -4,6 +4,8 @@ PyQt6でミニWebブラウザのUIを構築する。
 """
 
 import sys
+
+from fetcher import fetch_page
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -54,8 +56,15 @@ class BrowserWindow(QMainWindow):
 
     def _on_go(self):
         """Goボタン押下（またはEnterキー）時の処理"""
-        url = self.url_input.text()
-        self.text_area.setText(f"ボタンが押されました: {url}")
+        url = self.url_input.text().strip()
+        if not url:
+            return
+
+        success, content = fetch_page(url)
+        if success:
+            self.text_area.setText(content)
+        else:
+            self.text_area.setText(content)
 
 
 def main():
