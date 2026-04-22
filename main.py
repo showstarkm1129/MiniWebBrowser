@@ -7,6 +7,7 @@ import sys
 
 from fetcher import fetch_page
 from parser import parse_html
+from PyQt6.QtCore import QUrl
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -26,6 +27,7 @@ class BrowserWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("miniWebBrowser")
         self.resize(800, 600)
+        self._current_url = ""
         self._init_ui()
 
     def _init_ui(self):
@@ -53,6 +55,8 @@ class BrowserWindow(QMainWindow):
 
         # --- 下部：テキスト表示エリア ---
         self.text_area = QTextBrowser()
+        self.text_area.setOpenLinks(False)  # リンクを自動で開かない
+        self.text_area.anchorClicked.connect(self._on_link_clicked)
         main_layout.addWidget(self.text_area)
 
     def _on_go(self):
@@ -60,10 +64,21 @@ class BrowserWindow(QMainWindow):
         url = self.url_input.text().strip()
         if not url:
             return
+        self._navigate(url)
+
+    def _on_link_clicked(self, qurl: QUrl):
+        """テキスト内のリンクがクリックされた時の処理"""
+        url = qurl.toString()
+        self._navigate(url)
+
+    def _navigate(self, url: str):
+        """指定URLに遷移する"""
+        self._current_url = url
+        self.url_input.setText(url)
 
         success, content = fetch_page(url)
         if success:
-            styled_html = parse_html(content)
+            styled_html = parse_html(content, base_url=url)
             self.text_area.setHtml(styled_html)
         else:
             self.text_area.setText(content)
