@@ -5,14 +5,14 @@ PyQt6でミニWebブラウザのUIを構築する。
 7-2: 戻るボタン（履歴管理）
 7-3: ウィンドウタイトル連動
 7-4: QThreadによる非同期通信
-履歴パネル: サイドに閲覧履歴リストを表示
+履歴パネル: 「履歴」ボタンで開閉するサイドパネル
 """
 
 import sys
 
 from fetcher import fetch_page
 from parser import parse_html, get_title
-from PyQt6.QtCore import QUrl, QThread, pyqtSignal
+from PyQt6.QtCore import QUrl, QThread, pyqtSignal, Qt
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -27,16 +27,10 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QLabel,
 )
-from PyQt6.QtCore import Qt
 
 
 class FetchWorker(QThread):
-    """HTTP通信をバックグラウンドで実行するワーカースレッド。
-
-    UIスレッドをブロックせずにWebページを取得するために、
-    QThreadを使用して通信処理を別スレッドで実行する。
-    通信完了時にfinishedシグナルで結果を返す。
-    """
+    """HTTP通信をバックグラウンドで実行するワーカースレッド。"""
 
     finished = pyqtSignal(bool, str, str)  # (成功フラグ, コンテンツ, URL)
 
@@ -45,7 +39,6 @@ class FetchWorker(QThread):
         self._url = url
 
     def run(self):
-        """バックグラウンドでHTTP通信を実行する"""
         success, content = fetch_page(self._url)
         self.finished.emit(success, content, self._url)
 
@@ -56,24 +49,22 @@ class BrowserWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("miniWebBrowser")
-        self.resize(1000, 650)
+        self.resize(900, 650)
         self._current_url = ""
-        self._history = []          # 戻る用の履歴スタック（URLのリスト）
-        self._history_log = []      # 表示用の履歴ログ（URL, タイトル）のリスト
-        self._worker = None         # 現在のワーカースレッド
+        self._history = []       # 戻るボタン用の履歴スタック
+        self._history_log = []   # 表示用の履歴ログ
+        self._worker = None
+        self._history_visible = False  # 履歴パネルの表示状態
         self._init_ui()
 
     def _init_ui(self):
         """UIウィジェットを初期化・配置する"""
-        # 中央ウィジェット
         central = QWidget()
         self.setCentralWidget(central)
-
-        # メインレイアウト（縦並び）
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(4, 4, 4, 4)
 
-        # --- 上部ナビゲーションバー ---
+        # --- ナビゲーションバー ---
         nav_layout = QHBoxLayout()
 
         self.back_button = QPushButton("← 戻る")
@@ -88,77 +79,89 @@ class BrowserWindow(QMainWindow):
         self.go_button = QPushButton("Go")
         self.go_button.clicked.connect(self._on_go)
 
+        # 履歴トグルボタン（右端）
+        self.history_toggle_button = QPushButton("📋 履歴")
+        self.history_toggle_button.setFixedWidth(80)
+        self.history_toggle_button.setCheckable(True)
+        self.history_toggle_button.clicked.connect(self._on_toggle_history)
+
         nav_layout.addWidget(self.back_button)
         nav_layout.addWidget(self.url_input)
         nav_layout.addWidget(self.go_button)
+        nav_layout.addWidget(self.history_toggle_button)
         main_layout.addLayout(nav_layout)
 
-        # --- 下部：左に履歴パネル、右にコンテンツ（QSplitterで可変幅） ---
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # --- コンテンツ + 履歴パネル（QSplitter） ---
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 履歴パネル（左）
+        # コンテンツエリア（左）
+        self.text_area = QTextBrowser()
+        self.text_area.setOpenLinks(False)
+        self.text_area.anchorClicked.connect(self._on_link_clicked)
+        self.splitter.addWidget(self.text_area)
+
+        # 履歴パネル（右）
         history_panel = QWidget()
         history_layout = QVBoxLayout(history_panel)
-        history_layout.setContentsMargins(0, 0, 0, 0)
-        history_layout.setSpacing(2)
+        history_layout.setContentsMargins(4, 4, 4, 4)
+        history_layout.setSpacing(4)
 
         history_label = QLabel("📋 閲覧履歴")
-        history_label.setStyleSheet("font-weight: bold; padding: 4px;")
+        history_label.setStyleSheet("font-weight: bold; padding: 2px 4px;")
         history_layout.addWidget(history_label)
 
         self.history_list = QListWidget()
         self.history_list.setWordWrap(True)
-        self.history_list.itemDoubleClicked.connect(self._on_history_item_clicked)
         self.history_list.setToolTip("ダブルクリックでページを再表示")
+        self.history_list.itemDoubleClicked.connect(self._on_history_item_clicked)
         history_layout.addWidget(self.history_list)
 
         clear_button = QPushButton("履歴をクリア")
         clear_button.clicked.connect(self._on_clear_history)
         history_layout.addWidget(clear_button)
 
-        splitter.addWidget(history_panel)
+        self.splitter.addWidget(history_panel)
 
-        # コンテンツエリア（右）
-        self.text_area = QTextBrowser()
-        self.text_area.setOpenLinks(False)
-        self.text_area.anchorClicked.connect(self._on_link_clicked)
-        splitter.addWidget(self.text_area)
+        # 初期状態：履歴パネルを非表示
+        self.history_panel = history_panel
+        history_panel.hide()
 
-        # 初期幅比率：履歴パネル220px : コンテンツ残り
-        splitter.setSizes([220, 780])
-
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(self.splitter)
 
     # ------------------------------------------------------------------
     # スロット
     # ------------------------------------------------------------------
 
     def _on_go(self):
-        """Goボタン押下（またはEnterキー）時の処理"""
         url = self.url_input.text().strip()
         if not url:
             return
         self._navigate(url)
 
     def _on_link_clicked(self, qurl: QUrl):
-        """テキスト内のリンクがクリックされた時の処理"""
         self._navigate(qurl.toString())
 
     def _on_back(self):
-        """戻るボタン押下時の処理"""
         if len(self._history) >= 2:
             self._history.pop()
             prev_url = self._history.pop()
             self._navigate(prev_url)
 
+    def _on_toggle_history(self):
+        """履歴パネルの表示/非表示を切り替える"""
+        self._history_visible = self.history_toggle_button.isChecked()
+        if self._history_visible:
+            self.history_panel.show()
+            self.splitter.setSizes([680, 220])
+        else:
+            self.history_panel.hide()
+
     def _on_history_item_clicked(self, item: QListWidgetItem):
-        """履歴アイテムをダブルクリックした時の処理"""
         url = item.data(Qt.ItemDataRole.UserRole)
         if url:
             self._navigate(url)
 
     def _on_clear_history(self):
-        """履歴クリアボタン押下時の処理"""
         self._history_log.clear()
         self.history_list.clear()
 
@@ -167,7 +170,6 @@ class BrowserWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _navigate(self, url: str):
-        """指定URLに非同期で遷移する"""
         self.text_area.setText("読み込み中...")
         self._current_url = url
         self.url_input.setText(url)
@@ -181,7 +183,6 @@ class BrowserWindow(QMainWindow):
         self._worker.start()
 
     def _on_fetch_finished(self, success: bool, content: str, url: str):
-        """HTTP通信完了時の処理"""
         self.go_button.setEnabled(True)
         self.url_input.setEnabled(True)
 
@@ -189,20 +190,13 @@ class BrowserWindow(QMainWindow):
             title = get_title(content)
             display_title = title if title else url
 
-            # ウィンドウタイトル更新
             self.setWindowTitle(f"{display_title} - miniWebBrowser")
-
-            # コンテンツ表示
             styled_html = parse_html(content, base_url=url)
             self.text_area.setHtml(styled_html)
 
-            # 戻るボタン用の履歴スタックに追加
             self._history.append(url)
-
-            # 履歴ログに追加（重複は除かず、時系列順に記録）
             self._history_log.append((url, display_title))
             self._add_history_item(url, display_title)
-
         else:
             self.setWindowTitle("miniWebBrowser")
             self.text_area.setText(content)
@@ -211,13 +205,10 @@ class BrowserWindow(QMainWindow):
         self._worker = None
 
     def _add_history_item(self, url: str, title: str):
-        """履歴リストの先頭に新しいアイテムを追加する"""
-        # 表示テキスト：タイトル（短縮）とURL
         short_title = title if len(title) <= 30 else title[:28] + "…"
         item = QListWidgetItem(f"{short_title}\n{url}")
-        item.setData(Qt.ItemDataRole.UserRole, url)  # URLをメタデータとして保持
+        item.setData(Qt.ItemDataRole.UserRole, url)
         item.setToolTip(url)
-        # 最新を先頭に挿入
         self.history_list.insertItem(0, item)
 
 
