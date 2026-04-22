@@ -63,8 +63,8 @@ class BrowserWindow(QMainWindow):
 
         success, content = fetch_page(url)
         if success:
-            text = parse_html(content)
-            self.text_area.setText(text)
+            styled_html = parse_html(content)
+            self.text_area.setHtml(styled_html)
         else:
             self.text_area.setText(content)
 
