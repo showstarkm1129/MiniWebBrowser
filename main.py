@@ -2,10 +2,12 @@
 
 PyQt6でミニWebブラウザのUIを構築する。
 
-セッション4-A：BrowserTab 切り出し（リファクタリング）
-- BrowserTab(QWidget) にナビゲーション状態・ロジックを集約
-- BrowserWindow はUI制御のみ担当し、BrowserTab のシグナルで連動
-- 見た目・動作はフェーズ1完成時と同一
+セッション4-B：QTabWidget によるタブUI追加
+- 複数タブでページを同時に開ける
+- Ctrl+T / + ボタンで新規タブ
+- × ボタンでタブを閉じる（最後の1枚は閉じない）
+- タブ切替でURLバー・ボタン状態・ウィンドウタイトルが連動
+- バックグラウンドタブの読込が手前タブのUIに干渉しない
 """
 
 import sys
@@ -27,6 +29,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QLabel,
+    QTabWidget,
 )
 
 
@@ -59,16 +62,17 @@ class BrowserTab(QWidget):
     """
 
     url_changed = pyqtSignal(str)               # URL バー更新
-    title_changed = pyqtSignal(str)             # ウィンドウタイトル更新
-    nav_state_changed = pyqtSignal(bool, bool)  # (back_enabled, forward_enabled) + ロード完了通知
+    title_changed = pyqtSignal(str)             # ページタイトル（" - miniWebBrowser" なし）
+    nav_state_changed = pyqtSignal(bool, bool)  # (back_enabled, forward_enabled)
     load_started = pyqtSignal()                 # ロード開始（ボタン無効化）
     page_loaded = pyqtSignal(str, str)          # (url, display_title) 履歴パネル追加用
 
     def __init__(self):
         super().__init__()
         self._current_url = ""
-        self._history = []        # 戻るボタン用スタック（現在URLを含まない）
-        self._forward_stack = []  # 進むボタン用スタック
+        self._page_title = ""         # タブ切替時にタイトルを復元するために保持
+        self._history = []
+        self._forward_stack = []
         self._worker = None
         self._init_ui()
 
@@ -85,6 +89,10 @@ class BrowserTab(QWidget):
     @property
     def current_url(self) -> str:
         return self._current_url
+
+    @property
+    def page_title(self) -> str:
+        return self._page_title
 
     @property
     def can_go_back(self) -> bool:
@@ -139,12 +147,14 @@ class BrowserTab(QWidget):
         if success:
             title = get_title(content)
             display_title = title if title else url
-            self.title_changed.emit(f"{display_title} - miniWebBrowser")
+            self._page_title = display_title
+            self.title_changed.emit(display_title)
             styled_html = parse_html(content, base_url=url)
             self.text_area.setHtml(styled_html)
             self.page_loaded.emit(url, display_title)
         else:
-            self.title_changed.emit("miniWebBrowser")
+            self._page_title = ""
+            self.title_changed.emit("")
             self.text_area.setText(content)
 
         self.nav_state_changed.emit(self.can_go_back, self.can_go_forward)
@@ -208,13 +218,23 @@ class BrowserWindow(QMainWindow):
         main_layout.addLayout(nav_layout)
 
         QShortcut(QKeySequence("F5"), self).activated.connect(self._on_reload)
+        QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(self._new_tab)
 
-        # --- コンテンツ + 履歴パネル（QSplitter） ---
+        # --- タブウィジェット + 履歴パネル（QSplitter） ---
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        self.tab = BrowserTab()
-        self._connect_tab(self.tab)
-        self.splitter.addWidget(self.tab)
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.tabCloseRequested.connect(self._on_close_tab)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+
+        new_tab_btn = QPushButton("+")
+        new_tab_btn.setFixedSize(24, 24)
+        new_tab_btn.setToolTip("新しいタブ (Ctrl+T)")
+        new_tab_btn.clicked.connect(self._new_tab)
+        self.tab_widget.setCornerWidget(new_tab_btn, Qt.Corner.TopRightCorner)
+
+        self.splitter.addWidget(self.tab_widget)
 
         # 履歴パネル（右）
         history_panel = QWidget()
@@ -243,13 +263,70 @@ class BrowserWindow(QMainWindow):
 
         main_layout.addWidget(self.splitter)
 
+        # 起動時の最初のタブ
+        self._new_tab()
+
+    # ------------------------------------------------------------------
+    # タブ管理
+    # ------------------------------------------------------------------
+
+    def _new_tab(self, url: str = ""):
+        """新しいタブを作成してアクティブにする"""
+        tab = BrowserTab()
+        self._connect_tab(tab)
+        index = self.tab_widget.addTab(tab, "新しいタブ")
+        self.tab_widget.setCurrentIndex(index)
+        if url:
+            tab.navigate(url)
+
+    def _on_close_tab(self, index: int):
+        if self.tab_widget.count() == 1:
+            return  # 最後の1枚は閉じない
+        self.tab_widget.removeTab(index)
+
+    def _on_tab_changed(self, index: int):
+        """タブ切替時に URL バー・ボタン・ウィンドウタイトルを更新する"""
+        tab = self.tab_widget.widget(index)
+        if not isinstance(tab, BrowserTab):
+            return
+        self.url_input.setText(tab.current_url)
+        self.back_button.setEnabled(tab.can_go_back)
+        self.forward_button.setEnabled(tab.can_go_forward)
+        self.reload_button.setEnabled(bool(tab.current_url))
+        title = tab.page_title or tab.current_url
+        self.setWindowTitle(f"{title} - miniWebBrowser" if title else "miniWebBrowser")
+
     def _connect_tab(self, tab: BrowserTab):
-        """BrowserTab のシグナルを Window の各スロットに接続する"""
-        tab.url_changed.connect(self.url_input.setText)
-        tab.title_changed.connect(self.setWindowTitle)
-        tab.load_started.connect(self._on_load_started)
-        tab.nav_state_changed.connect(self._on_nav_state_changed)
+        """BrowserTab のシグナルを Window に接続する。
+        アクティブでないタブのシグナルはUI更新をスキップし、
+        タブラベルと履歴パネルは常に更新する。
+        """
+        tab.url_changed.connect(
+            lambda url, t=tab: self.url_input.setText(url) if self._is_active(t) else None
+        )
+        tab.title_changed.connect(
+            lambda title, t=tab: self._on_title_changed(title, t)
+        )
+        tab.load_started.connect(
+            lambda t=tab: self._on_load_started() if self._is_active(t) else None
+        )
+        tab.nav_state_changed.connect(
+            lambda b, f, t=tab: self._on_nav_state_changed(b, f) if self._is_active(t) else None
+        )
         tab.page_loaded.connect(self._add_history_item)
+
+    def _is_active(self, tab: BrowserTab) -> bool:
+        return self.tab_widget.currentWidget() is tab
+
+    def _on_title_changed(self, title: str, tab: BrowserTab):
+        """タブラベルを更新し、アクティブタブならウィンドウタイトルも更新する"""
+        label = title if title else "新しいタブ"
+        index = self.tab_widget.indexOf(tab)
+        if index >= 0:
+            short = (label[:14] + "…") if len(label) > 15 else label
+            self.tab_widget.setTabText(index, short)
+        if self._is_active(tab):
+            self.setWindowTitle(f"{title} - miniWebBrowser" if title else "miniWebBrowser")
 
     # ------------------------------------------------------------------
     # スロット
@@ -259,16 +336,24 @@ class BrowserWindow(QMainWindow):
         url = self.url_input.text().strip()
         if not url:
             return
-        self.tab.navigate(url)
+        tab = self.tab_widget.currentWidget()
+        if isinstance(tab, BrowserTab):
+            tab.navigate(url)
 
     def _on_back(self):
-        self.tab.go_back()
+        tab = self.tab_widget.currentWidget()
+        if isinstance(tab, BrowserTab):
+            tab.go_back()
 
     def _on_forward(self):
-        self.tab.go_forward()
+        tab = self.tab_widget.currentWidget()
+        if isinstance(tab, BrowserTab):
+            tab.go_forward()
 
     def _on_reload(self):
-        self.tab.reload()
+        tab = self.tab_widget.currentWidget()
+        if isinstance(tab, BrowserTab):
+            tab.reload()
 
     def _on_load_started(self):
         """ロード中はすべての操作ボタンを無効化する"""
@@ -298,7 +383,9 @@ class BrowserWindow(QMainWindow):
     def _on_history_item_clicked(self, item: QListWidgetItem):
         url = item.data(Qt.ItemDataRole.UserRole)
         if url:
-            self.tab.navigate(url)
+            tab = self.tab_widget.currentWidget()
+            if isinstance(tab, BrowserTab):
+                tab.navigate(url)
 
     def _on_clear_history(self):
         self._history_log.clear()
