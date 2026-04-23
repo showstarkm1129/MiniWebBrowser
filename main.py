@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QLabel,
     QTabWidget,
+    QTabBar,
 )
 
 
@@ -228,12 +229,6 @@ class BrowserWindow(QMainWindow):
         self.tab_widget.tabCloseRequested.connect(self._on_close_tab)
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
-        new_tab_btn = QPushButton("+")
-        new_tab_btn.setFixedSize(24, 24)
-        new_tab_btn.setToolTip("新しいタブ (Ctrl+T)")
-        new_tab_btn.clicked.connect(self._new_tab)
-        self.tab_widget.setCornerWidget(new_tab_btn, Qt.Corner.TopRightCorner)
-
         self.splitter.addWidget(self.tab_widget)
 
         # 履歴パネル（右）
@@ -263,29 +258,54 @@ class BrowserWindow(QMainWindow):
 
         main_layout.addWidget(self.splitter)
 
-        # 起動時の最初のタブ
+        # 起動時："+" タブを先に置いてから最初の実タブを挿入する
+        # （逆順にすると currentChanged が "+" タブ判定で誤作動する）
+        self._add_plus_tab()
         self._new_tab()
 
     # ------------------------------------------------------------------
     # タブ管理
     # ------------------------------------------------------------------
 
+    def _add_plus_tab(self):
+        """末尾に '+' タブを追加し、閉じるボタンを非表示にする。
+        addTab も currentChanged を発火するためシグナルをブロックする。
+        """
+        self.tab_widget.blockSignals(True)
+        idx = self.tab_widget.addTab(QWidget(), "+")
+        self.tab_widget.blockSignals(False)
+        self.tab_widget.tabBar().setTabButton(
+            idx, QTabBar.ButtonPosition.RightSide, None
+        )
+
     def _new_tab(self, url: str = ""):
-        """新しいタブを作成してアクティブにする"""
+        """新しいタブを '+' タブの直前に挿入してアクティブにする"""
         tab = BrowserTab()
         self._connect_tab(tab)
-        index = self.tab_widget.addTab(tab, "新しいタブ")
-        self.tab_widget.setCurrentIndex(index)
+        insert_idx = self.tab_widget.count() - 1  # "+" タブの手前
+        # insertTab が currentChanged を発火して _on_tab_changed が "+" 判定するのを防ぐ
+        self.tab_widget.blockSignals(True)
+        self.tab_widget.insertTab(insert_idx, tab, "新しいタブ")
+        self.tab_widget.blockSignals(False)
+        self.tab_widget.setCurrentIndex(insert_idx)
         if url:
             tab.navigate(url)
 
     def _on_close_tab(self, index: int):
-        if self.tab_widget.count() == 1:
-            return  # 最後の1枚は閉じない
+        # "+" タブ（末尾）は閉じない
+        if index == self.tab_widget.count() - 1:
+            return
+        # 実タブが残り1枚のときは閉じない（"+" タブ込みで count == 2）
+        if self.tab_widget.count() <= 2:
+            return
         self.tab_widget.removeTab(index)
 
     def _on_tab_changed(self, index: int):
         """タブ切替時に URL バー・ボタン・ウィンドウタイトルを更新する"""
+        # "+" タブがクリックされたら新規タブを開く
+        if index == self.tab_widget.count() - 1:
+            self._new_tab()
+            return
         tab = self.tab_widget.widget(index)
         if not isinstance(tab, BrowserTab):
             return
